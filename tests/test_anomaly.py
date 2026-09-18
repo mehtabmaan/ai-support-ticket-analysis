@@ -79,3 +79,40 @@ def test_outlier_explanation_mentions_category_baseline():
     assert "median" in top.explanation.lower()
     assert "Z-score" in top.explanation
     assert "Q3 + 1.5*IQR" in top.explanation
+
+
+def test_per_category_anomaly_cross_tab():
+    """
+    Permanently asserts the exact cross-tab breakdown of anomalies by category and type:
+    - Billing: 5 resolution outliers + 25 SLA breaches = 30 total
+    - General: 9 resolution outliers + 33 SLA breaches = 42 total
+    - Technical: 8 resolution outliers + 22 SLA breaches = 30 total
+    - Total: 102 anomalies
+    """
+    detector = AnomalyDetector()
+    res_outliers = detector.detect_resolution_time_outliers()
+    sla_breaches = detector.detect_sla_breaches()
+
+    cat_counts = {"Billing": {"outliers": 0, "sla": 0}, "General": {"outliers": 0, "sla": 0}, "Technical": {"outliers": 0, "sla": 0}}
+    for o in res_outliers:
+        cat_counts[o.category]["outliers"] += 1
+    for b in sla_breaches:
+        cat_counts[b.category]["sla"] += 1
+
+    assert cat_counts["Billing"]["outliers"] == 5
+    assert cat_counts["Billing"]["sla"] == 25
+    assert cat_counts["Billing"]["outliers"] + cat_counts["Billing"]["sla"] == 30
+
+    assert cat_counts["General"]["outliers"] == 9
+    assert cat_counts["General"]["sla"] == 33
+    assert cat_counts["General"]["outliers"] + cat_counts["General"]["sla"] == 42
+
+    assert cat_counts["Technical"]["outliers"] == 8
+    assert cat_counts["Technical"]["sla"] == 22
+    assert cat_counts["Technical"]["outliers"] + cat_counts["Technical"]["sla"] == 30
+
+    summary = detector.get_anomaly_summary()
+    assert summary["by_category"]["Billing"] == 30
+    assert summary["by_category"]["General"] == 42
+    assert summary["by_category"]["Technical"] == 30
+    assert summary["total_anomalies"] == 102
