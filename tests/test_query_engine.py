@@ -90,8 +90,10 @@ def test_out_of_scope_query_graceful_handling():
     assert resp["error"] == "No query generated"
 
 
-def test_offline_fallback_mode():
+def test_offline_fallback_mode(monkeypatch):
     """Confirms queries execute in offline deterministic mode with zero stack traces."""
+    monkeypatch.setattr("src.config.settings.GROQ_API_KEY", None)
+    monkeypatch.setattr("src.config.settings.LLM_PROVIDER", "fallback")
     engine = NLQueryEngine()
     resp = engine.execute_nl_query("How many tickets are currently open?")
     assert resp["is_fallback"] is True
@@ -99,3 +101,4 @@ def test_offline_fallback_mode():
     assert resp["results"][0]["open_tickets_count"] == 111
     assert "111" in resp["answer"]
     assert resp["error"] is None
+

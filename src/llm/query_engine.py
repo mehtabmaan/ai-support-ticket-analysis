@@ -132,6 +132,11 @@ class NLQueryEngine:
         ref_month = get_reference_month_str()
 
         # 1. Open tickets count
+        if ("not open" in q or "closed" in q or "unopened" in q) and "ticket" in q:
+            return (
+                "SELECT count(*) as not_open_tickets_count FROM tickets WHERE status <> 'Open';",
+                "Counts all tickets whose status is not Open."
+            )
         if "open" in q and ("how many" in q or "count" in q):
             return (
                 "SELECT count(*) as open_tickets_count FROM tickets WHERE status = 'Open';",

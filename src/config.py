@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # LLM Settings
     LLM_PROVIDER: str = "groq"  # "groq", "ollama", or "fallback"
     GROQ_API_KEY: Optional[str] = None
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3:latest"
     LLM_TIMEOUT_SECONDS: float = 30.0
