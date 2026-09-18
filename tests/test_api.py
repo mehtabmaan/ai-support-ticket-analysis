@@ -70,3 +70,24 @@ def test_query_validation_error(client):
     # Too short question
     response = client.post("/api/query", json={"question": "hi"})
     assert response.status_code == 422
+
+
+def test_query_missing_field_error(client):
+    response = client.post("/api/query", json={"not_a_question": "hello"})
+    assert response.status_code == 422
+    data = response.json()
+    assert "detail" in data
+    assert any(err["type"] == "missing" for err in data["detail"])
+
+
+def test_query_wrong_type_error(client):
+    response = client.post("/api/query", json={"question": 12345})
+    assert response.status_code == 422
+    data = response.json()
+    assert "detail" in data
+    assert any("string" in err["msg"].lower() for err in data["detail"])
+
+
+def test_query_empty_payload_error(client):
+    response = client.post("/api/query", json={})
+    assert response.status_code == 422

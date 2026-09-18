@@ -78,3 +78,24 @@ def test_generic_weekly_sparse_window():
     assert resp["caveats"] is not None
     assert "past 7-day window" in resp["caveats"].lower()
     assert "dataset average" in resp["caveats"].lower()
+
+
+def test_out_of_scope_query_graceful_handling():
+    """Confirms off-topic questions return a helpful, polite message without crashing."""
+    engine = NLQueryEngine()
+    resp = engine.execute_nl_query("What is the capital of France and what is the weather there?")
+    assert resp["row_count"] == 0
+    assert resp["sql"] is None
+    assert "unable to translate your question" in resp["answer"]
+    assert resp["error"] == "No query generated"
+
+
+def test_offline_fallback_mode():
+    """Confirms queries execute in offline deterministic mode with zero stack traces."""
+    engine = NLQueryEngine()
+    resp = engine.execute_nl_query("How many tickets are currently open?")
+    assert resp["is_fallback"] is True
+    assert resp["row_count"] == 1
+    assert resp["results"][0]["open_tickets_count"] == 111
+    assert "111" in resp["answer"]
+    assert resp["error"] is None

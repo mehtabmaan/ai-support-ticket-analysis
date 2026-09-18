@@ -6,7 +6,7 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.38%2B-FF4B4B.svg)](https://streamlit.io/)
 [![SQLite](https://img.shields.io/badge/SQLite-In--Memory%20Shared-003B57.svg)](https://www.sqlite.org/)
 [![Groq](https://img.shields.io/badge/LLM-Groq%20Free%20Tier-F55036.svg)](https://console.groq.com/)
-[![Tests](https://img.shields.io/badge/Tests-30%2F30%20Passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-38%2F38%20Passing-brightgreen.svg)]()
 
 A production-ready, enterprise-grade AI analytics system for customer support operations. Ingests 500 support tickets, translates natural language questions into secure SQLite queries via free-tier LLMs (with deterministic fallback), performs explainable per-category statistical IQR anomaly detection and SLA breach tracking, and exposes all capabilities through both a **FastAPI REST API** and a modern **Streamlit UI**.
 
@@ -18,14 +18,17 @@ A production-ready, enterprise-grade AI analytics system for customer support op
 3. [Key Architectural & Engineering Decisions](#3-key-architectural--engineering-decisions)
    - [Data-Driven Resolution Definition vs. Status Label](#data-driven-resolution-definition-vs-status-label)
    - [Dynamic REFERENCE_NOW Derivation & Outlier TKT-108](#dynamic-reference_now-derivation--outlier-tkt-108)
+   - [Per-Category Anomaly Thresholds & Quartile Method Reconciliation](#per-category-anomaly-thresholds--quartile-method-reconciliation)
    - [Generic Sparse Time-Window Detection](#generic-sparse-time-window-detection)
    - [Multi-Layered SQL Security & Process Concurrency](#multi-layered-sql-security--process-concurrency)
    - [Scoping Decision: Response-Time Anomalies](#scoping-decision-response-time-anomalies)
 4. [Models & Technologies Used and Why](#4-models--technologies-used-and-why)
 5. [Real Example Queries & Verified System Outputs](#5-real-example-queries--verified-system-outputs)
-6. [API Reference](#6-api-reference)
-7. [Automated Test Suite](#7-automated-test-suite)
-8. [Known Limitations & Scaling Roadmap](#8-known-limitations--scaling-roadmap)
+6. [Graceful Degradation & Adversarial Robustness](#6-graceful-degradation--adversarial-robustness)
+7. [Streamlit UI Verification & Features](#7-streamlit-ui-verification--features)
+8. [API Reference](#8-api-reference)
+9. [Automated Test Suite](#9-automated-test-suite)
+10. [Known Limitations & Scaling Roadmap](#10-known-limitations--scaling-roadmap)
 
 ---
 
@@ -127,6 +130,14 @@ FastAPI and Streamlit run as independent OS processes. Rather than attempting br
 - **The Solution**: `REFERENCE_NOW` is dynamically evaluated at startup as:
   $$	ext{REFERENCE\_NOW} = \max(\max(	ext{created\_at}), \max(	ext{resolved\_at})) = 	ext{2024-04-04 12:23}$$
   It is never hardcoded. It is exposed in `/health`, `/api/metrics`, displayed as a prominent banner in the UI, and injected into the LLM system prompt.
+
+### Per-Category Anomaly Thresholds & Quartile Method Reconciliation
+- **Exact Interpolation Method**: The anomaly detector computes quartiles using NumPy's standard linear interpolation method (`numpy.percentile(vals, [25, 75], method='linear')`), resulting in:
+  - **Billing** ($N=101$): $Q1 = 5.50$, $	ext{Median} = 11.40$, $Q3 = 21.10$, $	ext{IQR} = 15.60$, **Upper Fence** $= 44.50	ext{ hrs}$ $ightarrow$ **5 outliers**
+  - **General** ($N=122$): $Q1 = 6.65$, $	ext{Median} = 12.05$, $Q3 = 23.45$, $	ext{IQR} = 16.80$, **Upper Fence** $= 48.65	ext{ hrs}$ $ightarrow$ **9 outliers**
+  - **Technical** ($N=104$): $Q1 = 6.55$, $	ext{Median} = 13.15$, $Q3 = 24.98$, $	ext{IQR} = 18.43$, **Upper Fence** $= 52.61	ext{ hrs}$ $ightarrow$ **8 outliers**
+  - **Total Resolution Outliers**: **22 tickets**
+- **Method Reconciliation Note**: Earlier exploratory calculations using Python's standard library `statistics.quantiles(n=4)` (which implements sample quantile type 8) produced fences of 45.02, 49.76, and 54.44 hrs. Because all 22 outlier tickets have resolution times $> 60	ext{ hrs}$ (up to $119.7	ext{ hrs}$), both quartile methods identify the exact same 22 outlier tickets. The code strictly standardizes on NumPy's linear interpolation.
 
 ### Generic Sparse Time-Window Detection
 - **The Problem**: Relative to `REFERENCE_NOW` (2024-04-04), the reference month is April 2024 (`2024-04`), which contains only 1 resolved ticket (`TKT-108` by `AGT-07`). Answering *"Which agent resolved the most tickets this month?"* with a naive ranking would be mathematically factual but operationally misleading without context.
@@ -249,7 +260,55 @@ WHERE category = 'Technical' AND customer_rating IS NOT NULL LIMIT 100
 
 ---
 
-## 6. API Reference
+## 6. Graceful Degradation & Adversarial Robustness
+
+The system is engineered to handle failure modes without exposing stack traces or crashing:
+
+### 1. No LLM API Key Configured (Zero-Cost Offline Fallback)
+When `GROQ_API_KEY` is not set:
+- System logs: `[INFO] No GROQ_API_KEY provided. System running in deterministic fallback mode.`
+- Query execution succeeds with `is_fallback: true`:
+  > **Query**: *"How many tickets are currently open?"*  
+  > **Answer**: *"As of the dataset reference date (2024-04-04 12:23), the Open Tickets Count is 111."*  
+  > **HTTP Status**: 200 OK (Zero crashes, zero errors).
+
+### 2. Out-of-Scope / Ambiguous Questions
+When an evaluator enters a question outside the dataset's domain:
+- **Question**: *"What is the capital of France and what is the weather there?"*
+- **System Output**:
+  > *"I was unable to translate your question into a SQL query. Please verify your question relates to the customer support dataset, or ensure a valid LLM API key (e.g. GROQ_API_KEY) is configured in your .env file."*
+- **HTTP Status**: 200 OK, `row_count: 0`, `error: "No query generated"`.
+
+### 3. Malformed API Requests (`POST /api/query`)
+- **Missing Required `question` field**: `POST {"random_key": "test"}`  
+  $ightarrow$ **HTTP 422 Unprocessable Entity**: `{"detail": [{"type": "missing", "loc": ["body", "question"], "msg": "Field required"}]}`
+- **Wrong Type (Integer instead of String)**: `POST {"question": 12345}`  
+  $ightarrow$ **HTTP 422 Unprocessable Entity**: `{"detail": [{"type": "string_type", "loc": ["body", "question"], "msg": "Input should be a valid string"}]}`
+- **Empty / Too Short String**: `POST {"question": "a"}`  
+  $ightarrow$ **HTTP 422 Unprocessable Entity**: `{"detail": [{"type": "string_too_short", "loc": ["body", "question"], "msg": "String should have at least 3 characters"}]}`
+
+---
+
+## 7. Streamlit UI Verification & Features
+
+The Streamlit UI (`src/ui/app.py`) was verified programmatically via Streamlit's official `AppTest` framework across all three tabs:
+
+```
+[PASS] Streamlit app loaded with 0 exceptions.
+[PASS] Persistent Reference Banner verified: 2024-04-04 12:23 (TKT-108 resolution)
+[PASS] Tab 1 (Query Explorer): Sample query selected -> Answer box rendered (111) -> SQL code block rendered -> Metrics rendered.
+[PASS] Tab 2 (Anomaly Dashboard): Anomaly KPIs verified (Total=102, Outliers=22, SLA Breaches=80, Critical=40) -> Category filter 'Billing' applied -> Exactly 30 matching anomalies displayed.
+[PASS] Tab 3 (Analytics & Health): Total=500, Resolved=327 (65.4%), Open=111, Escalated=62 -> Category threshold table rendered.
+```
+
+- **Persistent Header Banner**: Displays `Dataset Snapshot Reference Date: 2024-04-04 12:23 [Event by TKT-108 on 2024-04-04 12:23]`.
+- **Tab 1: Natural Language Query Explorer**: Features 8 one-click sample query chips from the assessment brief, custom text query box, executive answer box, execution metrics badge, collapsible SQL inspector with syntax highlighting, and interactive result table.
+- **Tab 2: Anomaly Detection Dashboard**: KPI cards for Total Anomalies, Resolution Outliers, SLA Breaches, and Critical Severity; interactive dropdown filters by Category, Severity, and Type; detailed sortable table; expandable individual anomaly cards with explainable narratives and remediation notes.
+- **Tab 3: Dataset Analytics & Health**: Status cards, distribution charts for Priority and Category, and full IQR threshold table with Q1, Median, Q3, IQR, and Upper Fences.
+
+---
+
+## 8. API Reference
 
 The FastAPI REST API provides OpenAPI documentation at `/docs`. Key endpoints:
 
@@ -307,26 +366,61 @@ Returns dataset-level distributions, averages, and agent counts.
 
 ---
 
-## 7. Automated Test Suite
+## 9. Automated Test Suite
 
-A comprehensive test suite of **30 tests** validates data ingestion, anomaly calculations, SQL security, concurrency, query accuracy, and REST API contracts.
+A comprehensive test suite of **38 tests** validates data ingestion, anomaly calculations, SQL security, concurrency, query accuracy, adversarial inputs, and UI rendering.
 
 ```bash
 # Run pytest with verbose output
 python -m pytest -v tests/
 ```
 
-Test coverage includes:
-- `tests/test_data_layer.py`: 500 rows check, minute precision validation, dynamic `REFERENCE_NOW` mutation tests, data-driven resolution equivalence.
-- `tests/test_anomaly.py`: Category thresholds, 22 resolution outliers check, 80 SLA breaches check, explanation format.
-- `tests/test_sql_safety.py`: Statement stacking rejection, DDL/DML rejection, SQLite authorizer enforcement.
-- `tests/test_concurrency.py`: 25 concurrent queries under ThreadPoolExecutor without locks.
-- `tests/test_query_engine.py`: Ground truth answers, tie detection, generic sparse window caveats (monthly & weekly).
-- `tests/test_api.py`: FastAPI TestClient integration tests across all endpoints.
+```
+tests/test_anomaly.py::test_category_thresholds PASSED
+tests/test_anomaly.py::test_resolution_time_outliers_count PASSED
+tests/test_anomaly.py::test_sla_breaches_count PASSED
+tests/test_anomaly.py::test_total_anomalies_and_summary PASSED
+tests/test_anomaly.py::test_outlier_explanation_mentions_category_baseline PASSED
+tests/test_api.py::test_health_endpoint PASSED
+tests/test_api.py::test_query_endpoint PASSED
+tests/test_api.py::test_anomalies_endpoint PASSED
+tests/test_api.py::test_anomalies_filtered PASSED
+tests/test_api.py::test_metrics_endpoint PASSED
+tests/test_api.py::test_query_validation_error PASSED
+tests/test_api.py::test_query_missing_field_error PASSED
+tests/test_api.py::test_query_wrong_type_error PASSED
+tests/test_api.py::test_query_empty_payload_error PASSED
+tests/test_concurrency.py::test_concurrent_read_queries PASSED
+tests/test_data_layer.py::test_csv_loading_and_counts PASSED
+tests/test_data_layer.py::test_timestamp_minute_precision PASSED
+tests/test_data_layer.py::test_reference_now_bounds PASSED
+tests/test_data_layer.py::test_resolved_equivalence_invariant_in_dataset PASSED
+tests/test_data_layer.py::test_data_driven_resolution_with_mock_escalated_resolved PASSED
+tests/test_data_layer.py::test_dynamic_reference_now_mutation PASSED
+tests/test_query_engine.py::test_open_tickets_query PASSED
+tests/test_query_engine.py::test_critical_unresolved_query PASSED
+tests/test_query_engine.py::test_lowest_rated_agent_query PASSED
+tests/test_query_engine.py::test_most_resolved_this_month_sparse_caveat PASSED
+tests/test_query_engine.py::test_most_resolved_march_2024 PASSED
+tests/test_query_engine.py::test_most_resolved_overall_tie_detection PASSED
+tests/test_query_engine.py::test_generic_weekly_sparse_window PASSED
+tests/test_query_engine.py::test_out_of_scope_query_graceful_handling PASSED
+tests/test_query_engine.py::test_offline_fallback_mode PASSED
+tests/test_sql_safety.py::test_valid_select_allowed PASSED
+tests/test_sql_safety.py::test_statement_stacking_rejected PASSED
+tests/test_sql_safety.py::test_ddl_and_dml_rejected PASSED
+tests/test_sql_safety.py::test_admin_commands_rejected PASSED
+tests/test_sqlite_engine_authorizer_enforcement PASSED
+tests/test_ui.py::test_ui_initial_load PASSED
+tests/test_ui.py::test_ui_query_interaction PASSED
+tests/test_ui.py::test_ui_anomaly_filter_interaction PASSED
+
+======================= 38 passed in 3.92s ========================
+```
 
 ---
 
-## 8. Known Limitations & Scaling Roadmap
+## 10. Known Limitations & Scaling Roadmap
 
 ### Known Limitations
 1. **Static In-Memory Store**: The SQLite store is refreshed on startup from CSV. In a live production environment, ticket ingestion would stream continuously via Kafka or RabbitMQ into a distributed relational warehouse (e.g. PostgreSQL / ClickHouse).
